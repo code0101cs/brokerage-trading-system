@@ -30,6 +30,7 @@ jobs:
       DB_PASSWORD: postgres
       DB_PORT: 5432
       SECRET_KEY: ci-secret
+      REQUIRE_DB: 1
 
     steps:
       - uses: actions/checkout@v4

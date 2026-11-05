@@ -19,6 +19,17 @@ const testDb = "brokerage_test";
 let pool;
 let skip = false;
 
+// Decides at run time, after the before hook has tried to connect
+const dbTest = (name, fn) => {
+    test(name, async (t) => {
+        if (skip) {
+            return t.skip(skip);
+        }
+
+        await fn(t);
+    });
+};
+
 // Create a throwaway database, so dev data is never touched
 test.before(async () => {
     const admin = new Pool({ ...config, database: process.env.DB_NAME });
@@ -52,7 +63,7 @@ test.after(async () => {
     }
 });
 
-test("initDb builds an empty database with every table", { skip }, async () => {
+dbTest("initDb builds an empty database with every table", async () => {
     const rows = await pool.query(
         `SELECT table_name
          FROM information_schema.tables
@@ -63,11 +74,11 @@ test("initDb builds an empty database with every table", { skip }, async () => {
     assert.strictEqual(tables.length, 14);
 });
 
-test("initDb with reset can run twice", { skip }, async () => {
+dbTest("initDb with reset can run twice", async () => {
     await initDb(pool, true);
 });
 
-test("initDb without reset fails and leaves the tables alone", { skip }, async () => {
+dbTest("initDb without reset fails and leaves the tables alone", async () => {
     await assert.rejects(initDb(pool, false), /already exists/);
 
     const rows = await pool.query("SELECT count(*) AS n FROM information_schema.tables WHERE table_schema = 'public'");
@@ -75,7 +86,7 @@ test("initDb without reset fails and leaves the tables alone", { skip }, async (
     assert.strictEqual(Number(rows.rows[0].n), 14);
 });
 
-test("every table has a BIGINT identity primary key named id", { skip }, async () => {
+dbTest("every table has a BIGINT identity primary key named id", async () => {
     const rows = await pool.query(
         `SELECT table_name, data_type, is_identity, identity_generation
          FROM information_schema.columns
@@ -91,7 +102,7 @@ test("every table has a BIGINT identity primary key named id", { skip }, async (
     }
 });
 
-test("every idempotency column is unique", { skip }, async () => {
+dbTest("every idempotency column is unique", async () => {
     const rows = await pool.query(
         `SELECT t.relname AS table_name
          FROM pg_constraint c
@@ -103,7 +114,7 @@ test("every idempotency column is unique", { skip }, async () => {
     assert.deepStrictEqual(rows.rows.map((r) => r.table_name).sort(), ["orders", "transactions"]);
 });
 
-test("the indexes from the plan exist", { skip }, async () => {
+dbTest("the indexes from the plan exist", async () => {
     const rows = await pool.query("SELECT indexdef FROM pg_indexes WHERE schemaname = 'public'");
     const defs = rows.rows.map((r) => r.indexdef);
 
@@ -111,7 +122,7 @@ test("the indexes from the plan exist", { skip }, async () => {
     assert.ok(defs.some((d) => d.includes("ON public.entries") && d.includes("(user_id)")));
 });
 
-test("orders status check matches the state machine", { skip }, async () => {
+dbTest("orders status check matches the state machine", async () => {
     const rows = await pool.query(
         `SELECT pg_get_constraintdef(c.oid) AS def
          FROM pg_constraint c
@@ -126,7 +137,7 @@ test("orders status check matches the state machine", { skip }, async () => {
     assert.deepStrictEqual(found.sort(), [...STATES].sort());
 });
 
-test("constraints reject bad rows", { skip }, async () => {
+dbTest("constraints reject bad rows", async () => {
     await pool.query("INSERT INTO users (name, password_hash) VALUES ('u1', 'x')");
     await pool.query("INSERT INTO instruments (symbol, name, reference_price) VALUES ('TCS', 'Tata', 500.00)");
 
@@ -169,7 +180,7 @@ test("constraints reject bad rows", { skip }, async () => {
     await assert.rejects(pool.query("UPDATE orders SET filled_quantity = 11 WHERE idempotency_key = 'k1'"), (e) => e.code === "23514");
 });
 
-test("ledger and trade constraints", { skip }, async () => {
+dbTest("ledger and trade constraints", async () => {
     await pool.query("INSERT INTO transactions (idempotency_key, kind) VALUES ('t1', 'DEPOSIT')");
 
     // Duplicate transaction key

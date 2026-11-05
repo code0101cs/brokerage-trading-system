@@ -6,7 +6,8 @@
   "scripts": {
     "test": "node --test",
     "start": "node server.js",
-    "initdb": "node scripts/initDb.js"
+    "initdb": "node scripts/initDb.js",
+    "check": "node scripts/checkConnections.js"
   },
   "repository": {
     "type": "git",

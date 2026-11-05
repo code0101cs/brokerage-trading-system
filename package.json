@@ -1,0 +1,32 @@
+{
+  "name": "tramansys",
+  "version": "1.0.0",
+  "description": "Brokerage and trading management system",
+  "main": "server.js",
+  "scripts": {
+    "test": "node --test",
+    "start": "node server.js",
+    "initdb": "node scripts/initDb.js"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/code0101cs/brokerage-trading-system.git"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "commonjs",
+  "bugs": {
+    "url": "https://github.com/code0101cs/brokerage-trading-system/issues"
+  },
+  "homepage": "https://github.com/code0101cs/brokerage-trading-system#readme",
+  "dependencies": {
+    "bcrypt": "^6.0.0",
+    "dotenv": "^18.0.9",
+    "express": "^5.3.0",
+    "jsonwebtoken": "^9.0.3",
+    "pg": "^8.23.1",
+    "redis": "^6.3.1",
+    "ws": "^8.22.1"
+  }
+}

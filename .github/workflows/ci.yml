@@ -41,4 +41,11 @@ jobs:
 
       - run: npm ci
 
+      - name: Block float helpers under src
+        run: |
+          if grep -rnE "parseFloat|toFixed" src; then
+            echo "parseFloat and toFixed are not allowed under src (see ADR 0001)"
+            exit 1
+          fi
+
       - run: npm test

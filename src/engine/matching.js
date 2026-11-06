@@ -179,5 +179,7 @@ const submitMarket = (book, order, seq, ts) => submit(book, order, "MARKET", seq
 module.exports = {
     submitLimit,
     submitMarket,
-    make
+    make,
+    enter,
+    cancelEvent
 };

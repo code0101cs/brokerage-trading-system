@@ -216,12 +216,12 @@ A size decrease at the same price. The order keeps its place in the queue. A pri
 
 ## CancelRejected
 
-A cancel or replace named an order the book does not hold (unknown id or already finished). Book state is unchanged.
+A cancel or replace the book could not carry out. Book state is unchanged.
 
 | Field | Meaning |
 |---|---|
 | orderId | the id the command named |
-| reason | `ORDER_NOT_FOUND` |
+| reason | `ORDER_NOT_FOUND` when the book does not hold the id (unknown, or already filled or cancelled). `INVALID_ORDER` when a replace asks for a bad price or a quantity at or below what already filled. |
 
 ```json
 {

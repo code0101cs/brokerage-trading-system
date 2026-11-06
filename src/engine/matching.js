@@ -1,5 +1,5 @@
 const { EVENTS, REASONS } = require("../config/events.js");
-const { addOrder, takeFromNode, bestNode, remaining } = require("./orderBook.js");
+const { addOrder, takeFromNode, bestNode, remaining, sideOf } = require("./orderBook.js");
 
 const SIDES = ["BUY", "SELL"];
 const TIFS = ["DAY", "IOC", "FOK"];
@@ -86,12 +86,47 @@ const fill = (book, node, order, qty, tradeId, ctx, events) => {
     events.push(fillEvent(order, price, qty, tradeId, ctx));
 };
 
+// A limit order stops at its limit, a market order at its protection price if it has one
+const boundOf = (order) => (order.orderType === "LIMIT" ? order.price : order.protectionPrice);
+
+// True when a price is worse than the order accepts
+const beyond = (order, price, bound) => bound !== null && (order.side === "BUY" ? price > bound : price < bound);
+
+// Fill or kill is decided up front: null when the book can fill it all, else why not
+const shortfall = (book, order) => {
+    const opposite = order.side === "BUY" ? "SELL" : "BUY";
+    const side = sideOf(book, opposite);
+    const bound = boundOf(order);
+    const count = side.prices.length;
+    let need = remaining(order);
+
+    for (let i = 0; i < count; i++) {
+        const price = opposite === "SELL" ? side.prices[i] : side.prices[count - 1 - i];
+
+        if (beyond(order, price, bound)) {
+            break;
+        }
+
+        for (let node = side.levels.get(price).head; node; node = node.next) {
+            if (node.order.userId === order.userId) {
+                return REASONS.SELF_TRADE_PREVENTED;
+            }
+
+            need -= remaining(node.order);
+
+            if (need <= 0) {
+                return null;
+            }
+        }
+    }
+
+    return REASONS.FOK_NOT_FILLABLE;
+};
+
 // Match while the best opposite order is at a price the incoming order accepts
 const run = (book, order, ctx, events) => {
     const opposite = order.side === "BUY" ? "SELL" : "BUY";
-
-    // A limit order stops at its limit, a market order at its protection price if it has one
-    const bound = order.orderType === "LIMIT" ? order.price : order.protectionPrice;
+    const bound = boundOf(order);
     let n = 0;
 
     while (remaining(order) > 0) {
@@ -101,10 +136,13 @@ const run = (book, order, ctx, events) => {
             return "EXHAUSTED";
         }
 
-        const best = node.order.price;
-
-        if (bound !== null && (order.side === "BUY" ? best > bound : best < bound)) {
+        if (beyond(order, node.order.price, bound)) {
             return "BOUND";
+        }
+
+        // Never trade with yourself
+        if (node.order.userId === order.userId) {
+            return "SELF_TRADE";
         }
 
         n++;
@@ -126,15 +164,37 @@ const cancelEvent = (order, ctx, reason) =>
 
 // Match, then rest whatever is left
 const enter = (book, order, ctx, events) => {
+    // Fill or kill: all or nothing, before any trade is emitted
+    if (order.timeInForce === "FOK") {
+        const why = shortfall(book, order);
+
+        if (why) {
+            events.push(cancelEvent(order, ctx, why));
+            return;
+        }
+    }
+
     const stop = run(book, order, ctx, events);
 
     if (remaining(order) === 0) {
         return;
     }
 
+    // The incoming remainder is cancelled, the resting order is left alone
+    if (stop === "SELF_TRADE") {
+        events.push(cancelEvent(order, ctx, REASONS.SELF_TRADE_PREVENTED));
+        return;
+    }
+
     // A market order never rests
     if (order.orderType === "MARKET") {
         events.push(cancelEvent(order, ctx, stop === "BOUND" ? REASONS.PROTECTION_PRICE : REASONS.NO_LIQUIDITY));
+        return;
+    }
+
+    // Immediate or cancel: whatever did not trade is cancelled
+    if (order.timeInForce === "IOC") {
+        events.push(cancelEvent(order, ctx, REASONS.IOC_REMAINDER));
         return;
     }
 

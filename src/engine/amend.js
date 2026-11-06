@@ -75,7 +75,27 @@ const replace = (book, orderId, newQuantity, newPrice, seq, ts) => {
     return events;
 };
 
+// End of session: every resting DAY order is removed
+const expireAll = (book, seq, ts) => {
+    const ctx = { seq, ts, symbol: book.symbol };
+    const events = [];
+
+    for (const id of [...book.orders.keys()]) {
+        const order = removeOrder(book, id);
+
+        events.push(make(EVENTS.ORDER_EXPIRED, ctx, {
+            orderId: order.id,
+            userId: order.userId,
+            expiredQuantity: order.quantity - order.filled,
+            filledQuantity: order.filled
+        }));
+    }
+
+    return events;
+};
+
 module.exports = {
     cancel,
-    replace
+    replace,
+    expireAll
 };

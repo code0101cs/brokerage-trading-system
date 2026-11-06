@@ -102,6 +102,7 @@ const createTracker = () => {
                 // Re-entry after a replace keeps its fills and its state
                 if (t && t.replacing) {
                     t.original = e.quantity;
+                    t.price = e.price;
                     t.cancelled = 0;
                     t.replacing = false;
                     continue;
@@ -109,7 +110,15 @@ const createTracker = () => {
 
                 assert.ok(!t, `order ${e.orderId} accepted twice`);
 
-                orders.set(e.orderId, { original: e.quantity, filled: 0, cancelled: 0, replacing: false, state: transition("ACCEPTED", "ACK") });
+                orders.set(e.orderId, {
+                    original: e.quantity,
+                    filled: 0,
+                    cancelled: 0,
+                    price: e.price,
+                    side: e.side,
+                    replacing: false,
+                    state: transition("ACCEPTED", "ACK")
+                });
             } else if (e.type === EVENTS.ORDER_PARTIALLY_FILLED || e.type === EVENTS.ORDER_FILLED) {
                 assert.strictEqual(e.filledQuantity, t.filled + e.fillQuantity, "filled quantity adds up");
                 assert.strictEqual(e.remainingQuantity, t.original - e.filledQuantity - t.cancelled, "remaining quantity adds up");
@@ -135,9 +144,16 @@ const createTracker = () => {
         }
     };
 
-    // I5 for every order: filled + remaining + cancelled equals the original quantity
-    const check = (book) => {
-        for (const [id, t] of orders) {
+    // I5: filled + remaining + cancelled equals the original quantity, for the given ids or all of them
+    const check = (book, ids) => {
+        for (const id of ids || orders.keys()) {
+            const t = orders.get(id);
+
+            // Rejected orders and unknown ids were never tracked
+            if (!t) {
+                continue;
+            }
+
             const node = book.orders.get(id);
             const rest = node ? node.order.quantity - node.order.filled : 0;
 

@@ -22,6 +22,9 @@ const generate = (seed, count, users = 30) => {
     let mid = 10000;
     let nextId = 1;
 
+    // Last price and size sent for each limit order, a guess at what is resting
+    const hint = new Map();
+
     for (let seq = 1; seq <= count; seq++) {
         const ts = 1700000000000 + seq * 10;
         const roll = rand();
@@ -32,6 +35,10 @@ const generate = (seed, count, users = 30) => {
         if (roll < 0.5) {
             const side = rand() < 0.5 ? "BUY" : "SELL";
             const tif = rand() < 0.1 ? "IOC" : rand() < 0.07 ? "FOK" : "DAY";
+            const price = mid + int(-40, 40) * 5;
+            const quantity = rand() < 0.1 ? int(100, 600) : int(1, 60);
+
+            hint.set(nextId, { price, quantity });
 
             commands.push({
                 seq,
@@ -43,8 +50,8 @@ const generate = (seed, count, users = 30) => {
                     userId: int(1, users),
                     side,
                     timeInForce: tif,
-                    price: mid + int(-40, 40) * 5,
-                    quantity: rand() < 0.1 ? int(100, 600) : int(1, 60)
+                    price,
+                    quantity
                 }
             });
         } else if (roll < 0.65) {
@@ -66,12 +73,26 @@ const generate = (seed, count, users = 30) => {
             // Often an id that is long gone, which exercises CancelRejected
             commands.push({ seq, ts, type: "CANCEL", payload: { orderId: int(1, nextId - 1) } });
         } else if (roll < 0.95 && nextId > 1) {
-            commands.push({
-                seq,
-                ts,
-                type: "REPLACE",
-                payload: { orderId: int(1, nextId - 1), quantity: int(1, 120), price: mid + int(-40, 40) * 5 }
-            });
+            const orderId = int(1, nextId - 1);
+            const h = hint.get(orderId);
+            const mode = rand();
+            let quantity = int(1, 120);
+            let price = mid + int(-40, 40) * 5;
+
+            // Aim at the order's last known price and size, so every kind of replace really happens
+            if (h && mode < 0.2) {
+                quantity = h.quantity;
+                price = h.price;
+            } else if (h && mode < 0.4) {
+                quantity = Math.max(1, h.quantity - int(0, h.quantity - 1));
+                price = h.price;
+            } else if (h && mode < 0.55) {
+                quantity = h.quantity + int(1, 50);
+                price = h.price;
+            }
+
+            hint.set(orderId, { price, quantity });
+            commands.push({ seq, ts, type: "REPLACE", payload: { orderId, quantity, price } });
         } else if (roll < 0.953) {
             commands.push({ seq, ts, type: "EXPIRE", payload: {} });
         } else if (roll < 0.963) {

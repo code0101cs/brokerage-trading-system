@@ -15,7 +15,7 @@ const rng = (seed) => {
 };
 
 // A list of commands: limit, market, IOC, FOK, cancel, replace and a rare end of session
-const generate = (seed, count, users = 30) => {
+const generate = (seed, count, users = 30, expire = true) => {
     const rand = rng(seed);
     const int = (lo, hi) => lo + Math.floor(rand() * (hi - lo + 1));
     const commands = [];
@@ -93,7 +93,7 @@ const generate = (seed, count, users = 30) => {
 
             hint.set(orderId, { price, quantity });
             commands.push({ seq, ts, type: "REPLACE", payload: { orderId, quantity, price } });
-        } else if (roll < 0.953) {
+        } else if (roll < 0.953 && expire) {
             commands.push({ seq, ts, type: "EXPIRE", payload: {} });
         } else if (roll < 0.963) {
             // Bad input: a zero quantity or a price that is not positive

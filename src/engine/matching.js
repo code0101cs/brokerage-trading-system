@@ -1,4 +1,4 @@
-const { EVENTS } = require("../config/events.js");
+const { EVENTS, REASONS } = require("../config/events.js");
 const { addOrder, takeFromNode, bestNode, remaining } = require("./orderBook.js");
 
 const SIDES = ["BUY", "SELL"];
@@ -72,6 +72,9 @@ const fill = (book, node, order, qty, tradeId, ctx, events) => {
 // Match while the best opposite order is at a price the incoming order accepts
 const run = (book, order, ctx, events) => {
     const opposite = order.side === "BUY" ? "SELL" : "BUY";
+
+    // A limit order stops at its limit, a market order at its protection price if it has one
+    const bound = order.orderType === "LIMIT" ? order.price : order.protectionPrice;
     let n = 0;
 
     while (remaining(order) > 0) {
@@ -83,8 +86,8 @@ const run = (book, order, ctx, events) => {
 
         const best = node.order.price;
 
-        if (order.side === "BUY" ? best > order.price : best < order.price) {
-            return "NOT_MARKETABLE";
+        if (bound !== null && (order.side === "BUY" ? best > bound : best < bound)) {
+            return "BOUND";
         }
 
         n++;
@@ -95,13 +98,30 @@ const run = (book, order, ctx, events) => {
     return "DONE";
 };
 
+const cancelEvent = (order, ctx, reason) =>
+    make(EVENTS.ORDER_CANCELLED, ctx, {
+        orderId: order.id,
+        userId: order.userId,
+        cancelledQuantity: remaining(order),
+        filledQuantity: order.filled,
+        reason
+    });
+
 // Match, then rest whatever is left
 const enter = (book, order, ctx, events) => {
-    run(book, order, ctx, events);
+    const stop = run(book, order, ctx, events);
 
-    if (remaining(order) > 0) {
-        addOrder(book, order);
+    if (remaining(order) === 0) {
+        return;
     }
+
+    // A market order never rests
+    if (order.orderType === "MARKET") {
+        events.push(cancelEvent(order, ctx, stop === "BOUND" ? REASONS.PROTECTION_PRICE : REASONS.NO_LIQUIDITY));
+        return;
+    }
+
+    addOrder(book, order);
 };
 
 const submit = (book, input, orderType, seq, ts) => {
@@ -137,7 +157,10 @@ const submit = (book, input, orderType, seq, ts) => {
 
 const submitLimit = (book, order, seq, ts) => submit(book, order, "LIMIT", seq, ts);
 
+const submitMarket = (book, order, seq, ts) => submit(book, order, "MARKET", seq, ts);
+
 module.exports = {
     submitLimit,
+    submitMarket,
     make
 };

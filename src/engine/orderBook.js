@@ -13,6 +13,9 @@ const createBook = (symbol) => ({
 
 const remaining = (order) => order.quantity - order.filled;
 
+// Average fill price in paise, derived from the filled value
+const avgPrice = (order) => (order.filled === 0 ? null : order.value / order.filled);
+
 const sideOf = (book, side) => (side === "BUY" ? book.bids : book.asks);
 
 // First index whose price is at or above the one asked for
@@ -216,5 +219,6 @@ module.exports = {
     depth,
     snapshot,
     remaining,
+    avgPrice,
     sideOf
 };

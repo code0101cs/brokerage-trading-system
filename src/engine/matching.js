@@ -44,6 +44,19 @@ const valid = (o) => {
     return o.protectionPrice === null || (isInt(o.protectionPrice) && o.protectionPrice > 0);
 };
 
+// Progress of one order after a fill, partly or fully filled
+const fillEvent = (order, price, qty, tradeId, ctx) =>
+    make(remaining(order) === 0 ? EVENTS.ORDER_FILLED : EVENTS.ORDER_PARTIALLY_FILLED, ctx, {
+        orderId: order.id,
+        userId: order.userId,
+        tradeId,
+        fillPrice: price,
+        fillQuantity: qty,
+        filledQuantity: order.filled,
+        remainingQuantity: remaining(order),
+        filledValue: order.value
+    });
+
 // One match: the trade, then the book and the incoming order move
 const fill = (book, node, order, qty, tradeId, ctx, events) => {
     const resting = node.order;
@@ -67,6 +80,10 @@ const fill = (book, node, order, qty, tradeId, ctx, events) => {
 
     order.filled += qty;
     order.value += price * qty;
+
+    // Resting side first, then the incoming side
+    events.push(fillEvent(resting, price, qty, tradeId, ctx));
+    events.push(fillEvent(order, price, qty, tradeId, ctx));
 };
 
 // Match while the best opposite order is at a price the incoming order accepts

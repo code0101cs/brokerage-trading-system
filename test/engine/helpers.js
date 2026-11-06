@@ -2,6 +2,9 @@ const fs = require("node:fs");
 const path = require("node:path");
 const assert = require("node:assert");
 
+const { EVENTS, REASONS } = require("../../src/config/events.js");
+const { transition } = require("../../src/config/orderStates.js");
+
 const doc = fs.readFileSync(path.join(__dirname, "..", "..", "docs", "events.md"), "utf8");
 
 const examples = {};
@@ -87,4 +90,67 @@ const assertConsistent = (book) => {
     }
 };
 
-module.exports = { ex, mk, types, assertConsistent };
+// Follows every order through its events: quantity rule I5 and the state machine
+const createTracker = () => {
+    const orders = new Map();
+
+    const apply = (events) => {
+        for (const e of events) {
+            const t = orders.get(e.orderId);
+
+            if (e.type === EVENTS.ORDER_ACCEPTED) {
+                // Re-entry after a replace keeps its fills and its state
+                if (t && t.replacing) {
+                    t.original = e.quantity;
+                    t.cancelled = 0;
+                    t.replacing = false;
+                    continue;
+                }
+
+                assert.ok(!t, `order ${e.orderId} accepted twice`);
+
+                orders.set(e.orderId, { original: e.quantity, filled: 0, cancelled: 0, replacing: false, state: transition("ACCEPTED", "ACK") });
+            } else if (e.type === EVENTS.ORDER_PARTIALLY_FILLED || e.type === EVENTS.ORDER_FILLED) {
+                assert.strictEqual(e.filledQuantity, t.filled + e.fillQuantity, "filled quantity adds up");
+                assert.strictEqual(e.remainingQuantity, t.original - e.filledQuantity - t.cancelled, "remaining quantity adds up");
+
+                t.filled = e.filledQuantity;
+                t.state = transition(t.state, e.type === EVENTS.ORDER_FILLED ? "FILL" : "PARTIAL_FILL");
+            } else if (e.type === EVENTS.ORDER_CANCELLED) {
+                assert.strictEqual(e.filledQuantity, t.filled, "cancel reports the fills so far");
+
+                t.cancelled += e.cancelledQuantity;
+
+                if (e.reason === REASONS.REPLACED) {
+                    t.replacing = true;
+                } else {
+                    t.state = transition(t.state, "CANCELLED");
+                }
+            } else if (e.type === EVENTS.ORDER_EXPIRED) {
+                t.cancelled += e.expiredQuantity;
+                t.state = transition(t.state, "EXPIRE");
+            } else if (e.type === EVENTS.ORDER_REPLACED) {
+                t.original = e.newQuantity;
+            }
+        }
+    };
+
+    // I5 for every order: filled + remaining + cancelled equals the original quantity
+    const check = (book) => {
+        for (const [id, t] of orders) {
+            const node = book.orders.get(id);
+            const rest = node ? node.order.quantity - node.order.filled : 0;
+
+            assert.strictEqual(t.filled + rest + t.cancelled, t.original, `I5 broken for order ${id}`);
+
+            if (node) {
+                assert.strictEqual(node.order.filled, t.filled, `engine and events disagree on fills of order ${id}`);
+                assert.strictEqual(t.replacing, false);
+            }
+        }
+    };
+
+    return { apply, check, orders };
+};
+
+module.exports = { ex, mk, types, assertConsistent, createTracker };

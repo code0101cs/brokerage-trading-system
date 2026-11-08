@@ -89,9 +89,23 @@ const postEntries = async (client, { idemp, kind, description, cash = [], shares
     return transId;
 };
 
+// Lock wallet rows in ascending user_id order, so two requests that need the same
+// wallets can never wait on each other in a circle
+const lockWallets = async (client, userIds) => {
+    await client.query(
+        `SELECT id
+         FROM wallets
+         WHERE user_id = ANY($1::bigint[])
+         ORDER BY user_id
+         FOR UPDATE`,
+        [userIds]
+    );
+};
+
 module.exports = {
     SYSTEM_ACCOUNTS,
     seedSystem,
     systemId,
-    postEntries
+    postEntries,
+    lockWallets
 };

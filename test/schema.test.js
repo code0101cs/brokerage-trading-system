@@ -1,70 +1,14 @@
-require("dotenv").config({ quiet: true });
-
 const test = require("node:test");
 const assert = require("node:assert");
-const { Pool } = require("pg");
 
 const { initDb, tables } = require("../scripts/initDb.js");
 const { STATES } = require("../src/config/orderStates.js");
+const { useDb } = require("./helpers/db.js");
 
-const config = {
-    user: process.env.DB_USER,
-    host: process.env.DB_HOST,
-    password: process.env.DB_PASSWORD,
-    port: process.env.DB_PORT
-};
-
-const testDb = "brokerage_test";
-
-let pool;
-let skip = false;
-
-// Decides at run time, after the before hook has tried to connect
-const dbTest = (name, fn) => {
-    test(name, async (t) => {
-        if (skip) {
-            return t.skip(skip);
-        }
-
-        await fn(t);
-    });
-};
-
-// Create a throwaway database, so dev data is never touched
-test.before(async () => {
-    const admin = new Pool({ ...config, database: process.env.DB_NAME });
-
-    try {
-        const check = await admin.query("SELECT 1 FROM pg_database WHERE datname = $1", [testDb]);
-
-        if (check.rows.length === 0) {
-            await admin.query(`CREATE DATABASE ${testDb}`);
-        }
-    } catch (error) {
-        // CI must have a database, a laptop without one just skips
-        if (process.env.REQUIRE_DB === "1") {
-            throw error;
-        }
-
-        skip = "postgres is not reachable";
-        return;
-    } finally {
-        await admin.end();
-    }
-
-    pool = new Pool({ ...config, database: testDb });
-
-    await initDb(pool, true);
-});
-
-test.after(async () => {
-    if (pool) {
-        await pool.end();
-    }
-});
+const { state, dbTest } = useDb("schema");
 
 dbTest("initDb builds an empty database with every table", async () => {
-    const rows = await pool.query(
+    const rows = await state.pool.query(
         `SELECT table_name
          FROM information_schema.tables
          WHERE table_schema = 'public'`
@@ -75,19 +19,19 @@ dbTest("initDb builds an empty database with every table", async () => {
 });
 
 dbTest("initDb with reset can run twice", async () => {
-    await initDb(pool, true);
+    await initDb(state.pool, true);
 });
 
 dbTest("initDb without reset fails and leaves the tables alone", async () => {
-    await assert.rejects(initDb(pool, false), /already exists/);
+    await assert.rejects(initDb(state.pool, false), /already exists/);
 
-    const rows = await pool.query("SELECT count(*) AS n FROM information_schema.tables WHERE table_schema = 'public'");
+    const rows = await state.pool.query("SELECT count(*) AS n FROM information_schema.tables WHERE table_schema = 'public'");
 
     assert.strictEqual(Number(rows.rows[0].n), 14);
 });
 
 dbTest("every table has a BIGINT identity primary key named id", async () => {
-    const rows = await pool.query(
+    const rows = await state.pool.query(
         `SELECT table_name, data_type, is_identity, identity_generation
          FROM information_schema.columns
          WHERE table_schema = 'public' AND column_name = 'id'`
@@ -103,7 +47,7 @@ dbTest("every table has a BIGINT identity primary key named id", async () => {
 });
 
 dbTest("every idempotency column is unique", async () => {
-    const rows = await pool.query(
+    const rows = await state.pool.query(
         `SELECT t.relname AS table_name
          FROM pg_constraint c
          JOIN pg_class t ON t.oid = c.conrelid
@@ -115,7 +59,7 @@ dbTest("every idempotency column is unique", async () => {
 });
 
 dbTest("the indexes from the plan exist", async () => {
-    const rows = await pool.query("SELECT indexdef FROM pg_indexes WHERE schemaname = 'public'");
+    const rows = await state.pool.query("SELECT indexdef FROM pg_indexes WHERE schemaname = 'public'");
     const defs = rows.rows.map((r) => r.indexdef);
 
     assert.ok(defs.some((d) => d.includes("ON public.orders") && d.includes("(symbol, status)")));
@@ -123,7 +67,7 @@ dbTest("the indexes from the plan exist", async () => {
 });
 
 dbTest("orders status check matches the state machine", async () => {
-    const rows = await pool.query(
+    const rows = await state.pool.query(
         `SELECT pg_get_constraintdef(c.oid) AS def
          FROM pg_constraint c
          JOIN pg_class t ON t.oid = c.conrelid
@@ -138,11 +82,11 @@ dbTest("orders status check matches the state machine", async () => {
 });
 
 dbTest("constraints reject bad rows", async () => {
-    await pool.query("INSERT INTO users (name, password_hash) VALUES ('u1', 'x')");
-    await pool.query("INSERT INTO instruments (symbol, name, reference_price) VALUES ('TCS', 'Tata', 500.00)");
+    await state.pool.query("INSERT INTO users (name, password_hash) VALUES ('u1', 'x')");
+    await state.pool.query("INSERT INTO instruments (symbol, name, reference_price) VALUES ('TCS', 'Tata', 500.00)");
 
     const order = (qty, status, key, type = "LIMIT", price = 500) =>
-        pool.query(
+        state.pool.query(
             `INSERT INTO orders
              (user_id, symbol, side, order_type, time_in_force, price, quantity, status, idempotency_key)
              VALUES (1, 'TCS', 'BUY', $4, 'DAY', $5, $1, $2, $3)`,
@@ -168,7 +112,7 @@ dbTest("constraints reject bad rows", async () => {
 
     // Unknown symbol is blocked by the foreign key
     await assert.rejects(
-        pool.query(
+        state.pool.query(
             `INSERT INTO orders
              (user_id, symbol, side, order_type, time_in_force, price, quantity, status, idempotency_key)
              VALUES (1, 'NOPE', 'BUY', 'LIMIT', 'DAY', 1, 1, 'NEW', 'k6')`
@@ -177,37 +121,37 @@ dbTest("constraints reject bad rows", async () => {
     );
 
     // Filled cannot pass the quantity
-    await assert.rejects(pool.query("UPDATE orders SET filled_quantity = 11 WHERE idempotency_key = 'k1'"), (e) => e.code === "23514");
+    await assert.rejects(state.pool.query("UPDATE orders SET filled_quantity = 11 WHERE idempotency_key = 'k1'"), (e) => e.code === "23514");
 });
 
 dbTest("ledger and trade constraints", async () => {
-    await pool.query("INSERT INTO transactions (idempotency_key, kind) VALUES ('t1', 'DEPOSIT')");
+    await state.pool.query("INSERT INTO transactions (idempotency_key, kind) VALUES ('t1', 'DEPOSIT')");
 
     // Duplicate transaction key
-    await assert.rejects(pool.query("INSERT INTO transactions (idempotency_key, kind) VALUES ('t1', 'DEPOSIT')"), (e) => e.code === "23505");
+    await assert.rejects(state.pool.query("INSERT INTO transactions (idempotency_key, kind) VALUES ('t1', 'DEPOSIT')"), (e) => e.code === "23505");
 
     // Unknown kind
-    await assert.rejects(pool.query("INSERT INTO transactions (idempotency_key, kind) VALUES ('t2', 'GIFT')"), (e) => e.code === "23514");
+    await assert.rejects(state.pool.query("INSERT INTO transactions (idempotency_key, kind) VALUES ('t2', 'GIFT')"), (e) => e.code === "23514");
 
     // Entry amounts are positive and typed
-    await assert.rejects(pool.query("INSERT INTO entries (user_id, transaction_id, amount, entry_type) VALUES (1, 1, 0, 'DEBIT')"), (e) => e.code === "23514");
-    await assert.rejects(pool.query("INSERT INTO entries (user_id, transaction_id, amount, entry_type) VALUES (1, 1, 5, 'SIDEWAYS')"), (e) => e.code === "23514");
+    await assert.rejects(state.pool.query("INSERT INTO entries (user_id, transaction_id, amount, entry_type) VALUES (1, 1, 0, 'DEBIT')"), (e) => e.code === "23514");
+    await assert.rejects(state.pool.query("INSERT INTO entries (user_id, transaction_id, amount, entry_type) VALUES (1, 1, 5, 'SIDEWAYS')"), (e) => e.code === "23514");
 
     // Share quantity is positive
-    await assert.rejects(pool.query("INSERT INTO share_entries (user_id, transaction_id, symbol, quantity, entry_type) VALUES (1, 1, 'TCS', 0, 'CREDIT')"), (e) => e.code === "23514");
+    await assert.rejects(state.pool.query("INSERT INTO share_entries (user_id, transaction_id, symbol, quantity, entry_type) VALUES (1, 1, 'TCS', 0, 'CREDIT')"), (e) => e.code === "23514");
 
     // One hold per order
-    await pool.query("INSERT INTO holds (user_id, order_id, cash_amount) VALUES (1, 1, 100)");
-    await assert.rejects(pool.query("INSERT INTO holds (user_id, order_id, cash_amount) VALUES (1, 1, 100)"), (e) => e.code === "23505");
+    await state.pool.query("INSERT INTO holds (user_id, order_id, cash_amount) VALUES (1, 1, 100)");
+    await assert.rejects(state.pool.query("INSERT INTO holds (user_id, order_id, cash_amount) VALUES (1, 1, 100)"), (e) => e.code === "23505");
 
     // Event stream positions are unique per stream
-    await pool.query("INSERT INTO events (stream, stream_seq, type, payload) VALUES ('TCS', 1, 'OrderAccepted', '{}')");
-    await assert.rejects(pool.query("INSERT INTO events (stream, stream_seq, type, payload) VALUES ('TCS', 1, 'OrderAccepted', '{}')"), (e) => e.code === "23505");
+    await state.pool.query("INSERT INTO events (stream, stream_seq, type, payload) VALUES ('TCS', 1, 'OrderAccepted', '{}')");
+    await assert.rejects(state.pool.query("INSERT INTO events (stream, stream_seq, type, payload) VALUES ('TCS', 1, 'OrderAccepted', '{}')"), (e) => e.code === "23505");
 
     // Money has two decimals and no more
-    await pool.query("INSERT INTO entries (user_id, transaction_id, amount, entry_type) VALUES (1, 1, 10.019, 'CREDIT')");
+    await state.pool.query("INSERT INTO entries (user_id, transaction_id, amount, entry_type) VALUES (1, 1, 10.019, 'CREDIT')");
 
-    const rows = await pool.query("SELECT amount FROM entries WHERE amount > 0");
+    const rows = await state.pool.query("SELECT amount FROM entries WHERE amount > 0");
 
     assert.strictEqual(rows.rows[0].amount, "10.02");
 });

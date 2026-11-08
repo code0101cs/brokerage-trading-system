@@ -10,3 +10,7 @@ CREATE TABLE share_entries (
 
 CREATE INDEX idx_share_entries_user ON share_entries (user_id, symbol);
 CREATE INDEX idx_share_entries_transaction ON share_entries (transaction_id);
+
+CREATE TRIGGER share_entries_no_change
+BEFORE UPDATE OR DELETE ON share_entries
+FOR EACH ROW EXECUTE FUNCTION block_change();

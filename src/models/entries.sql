@@ -9,3 +9,13 @@ CREATE TABLE entries (
 
 CREATE INDEX idx_entries_user ON entries (user_id);
 CREATE INDEX idx_entries_transaction ON entries (transaction_id);
+
+CREATE FUNCTION block_change() RETURNS TRIGGER AS $$
+BEGIN
+    RAISE EXCEPTION '% on % is not allowed, the table is append-only', TG_OP, TG_TABLE_NAME;
+END;
+$$ LANGUAGE plpgsql;
+
+CREATE TRIGGER entries_no_change
+BEFORE UPDATE OR DELETE ON entries
+FOR EACH ROW EXECUTE FUNCTION block_change();

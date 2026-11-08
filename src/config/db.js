@@ -1,4 +1,7 @@
-const { Pool } = require("pg");
+const { Pool, types } = require("pg");
+
+// BIGINT (ids, quantities, counts) as a number, NUMERIC stays a string so money is exact
+types.setTypeParser(20, (value) => Number(value));
 
 const pool = new Pool({
     user: process.env.DB_USER,

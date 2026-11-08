@@ -1,9 +1,12 @@
 require("dotenv").config({ quiet: true });
 
 const test = require("node:test");
-const { Pool } = require("pg");
+const { Pool, types } = require("pg");
 
 const { initDb } = require("../../scripts/initDb.js");
+
+// Same as src/config/db.js, the helper pool does not load that file
+types.setTypeParser(20, (value) => Number(value));
 
 const config = {
     user: process.env.DB_USER,

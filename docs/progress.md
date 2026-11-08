@@ -1,5 +1,32 @@
 # Progress
 
+## Phase 3: Accounts, ledger and positions (v0.3)
+
+Exit gate: every transaction balances, and the audit query reports zero drift. Met.
+
+| Task | What landed |
+|---|---|
+| 3.1 | ADR 0002 lists every ledger table, every transaction kind and the exact rows each writes. `users.is_system` and the seeded `deposits`, `exchange` and `fees` accounts. |
+| 3.2 | `postEntries` in `src/config/ledger.js`. Triggers block UPDATE and DELETE on `entries` and `share_entries`. |
+| 3.3 | `POST /auth/register`, `POST /auth/login`, `POST /account/deposit`, `GET /account/balance`, `authMiddleware.js`. |
+| 3.4 | Holds (`src/config/holds.js`), the shared fee expression (`fees.js`), `moveOrder` (`orders.js`), `lockWallets`, and a first cut of `POST /orders`. |
+| 3.5 | `buyFill` and `sellFill` in `src/config/positions.js`, SQL expressions only, a table of 15 hand-calculated sequences. |
+| 3.6 | `GET /account/portfolio` with mark price, market value and unrealised P&L from one query, plus realised, unrealised, fees and net P&L. |
+| 3.7 | `npm run audit` with 7 checks. A test settles 1,000 random trades from 20 users, eight at a time, and the audit stays green. Another corrupts rows by hand and every check fires. |
+
+Notes:
+
+- `POST /orders` exists now, in a minimal form, because 3.4's exit test needs it: limit orders only, available cash or shares checked under the wallet lock, order and hold written in one transaction, lifecycle NEW, PENDING_RISK, ACCEPTED logged in `order_events`. An order that does not fit answers 400 and leaves no row. Phase 4 grows this into the full risk checks, `rejectOrder` (which stores REJECTED), market orders and cancel.
+- `initDb` now seeds the three system accounts, so a freshly built database is no longer completely empty. The schema test checks for exactly those three rows.
+- BIGINT columns (ids, quantities, counts) now come back from `pg` as numbers, set once in `src/config/db.js`. NUMERIC stays a string, so money is never a float.
+- The fee expression is wrapped in `ROUND(..., 2)`. It changes no value, but numeric division otherwise returns a long tail of zeros (`50015.0000000000000000`). The tests caught that.
+- `avg_cost` keeps 4 decimals as the plan says, so each fill rounds it. The tests pin the rounding down to the paisa.
+- The portfolio response has four keys beyond `{ portfolio: rows }`: `realizedPnl`, `unrealizedPnl`, `feesPaid`, `netPnl`. Rows include closed positions (quantity 0), so their realised P&L stays visible. Fees paid are the user's own FEE debits, which equal the credits the fees account received.
+- Shares are handed out only by a test helper (a DEPOSIT with share legs, plus the position). There is no endpoint for it yet.
+- The audit's `holds_within_balances` only compares holds that actually reserve cash (or shares) with cash (or shares), so a sell hold's zero cash never trips it.
+- Each database test file now gets its own throwaway database, created and dropped by `test/helpers/db.js`, so files run side by side. Root-level `before` hooks run concurrently, not in order, so the HTTP helper starts the server on the first request.
+- The full suite takes about 53 seconds, nearly all of it the 1,000-trade audit test and the concurrency tests.
+
 ## Phase 2: Matching engine core (v0.2)
 
 Exit gate: 100k random commands replay with zero invariant violations, and the engine agrees with a naive reference implementation on every event. Met.

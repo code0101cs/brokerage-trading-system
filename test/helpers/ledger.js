@@ -1,5 +1,6 @@
 // Small helpers for tests that need users, instruments and money in the database
 const { postEntries, systemId } = require("../../src/config/ledger.js");
+const { buyFill } = require("../../src/config/positions.js");
 
 const addUser = async (pool, name) => {
     const user = await pool.query(
@@ -56,8 +57,13 @@ const depositCash = async (pool, userId, amount) => {
     return postEntries(pool, { idemp: key("dep"), kind: "DEPOSIT", description: "test deposit", cash: [{ debit: deposits, credit: userId, amount }] });
 };
 
-const depositShares = async (pool, userId, symbol, quantity) => {
+// With a cost the position is created too, the way real code that hands out shares must
+const depositShares = async (pool, userId, symbol, quantity, cost) => {
     const deposits = await systemId(pool, "deposits");
+
+    if (cost !== undefined) {
+        await buyFill(pool, userId, symbol, quantity, cost);
+    }
 
     return postEntries(pool, { idemp: key("depsh"), kind: "DEPOSIT", description: "test shares", shares: [{ debit: deposits, credit: userId, symbol, quantity }] });
 };

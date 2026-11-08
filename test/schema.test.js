@@ -18,6 +18,19 @@ dbTest("initDb builds an empty database with every table", async () => {
     assert.strictEqual(tables.length, 14);
 });
 
+dbTest("initDb seeds the three system accounts and nothing else", async () => {
+    const rows = await state.pool.query("SELECT name, is_system, password_hash FROM users ORDER BY id");
+
+    assert.deepStrictEqual(rows.rows.map((r) => r.name), ["deposits", "exchange", "fees"]);
+
+    for (const r of rows.rows) {
+        assert.strictEqual(r.is_system, true);
+
+        // Not a bcrypt hash, so nobody can log in as a system account
+        assert.strictEqual(r.password_hash, "!");
+    }
+});
+
 dbTest("initDb with reset can run twice", async () => {
     await initDb(state.pool, true);
 });

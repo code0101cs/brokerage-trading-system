@@ -1,6 +1,8 @@
 const fs = require("node:fs");
 const path = require("node:path");
 
+const { seedSystem } = require("../src/config/ledger.js");
+
 // Dependency order: a table comes after every table it references
 const tables = [
     "users",
@@ -39,6 +41,9 @@ const initDb = async (pool, reset) => {
 
             await client.query(sql);
         }
+
+        // Deposits, exchange and fees
+        await seedSystem(client);
 
         await client.query("COMMIT");
     } catch (error) {

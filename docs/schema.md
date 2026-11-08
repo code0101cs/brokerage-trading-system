@@ -32,6 +32,7 @@ erDiagram
         bigint id PK
         varchar name UK
         varchar password_hash
+        boolean is_system
     }
     wallets {
         bigint id PK

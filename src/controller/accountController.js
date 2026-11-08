@@ -122,7 +122,75 @@ const balance = async (req, res) => {
     }
 };
 
+// Every position with its mark: the latest trade price, else the instrument's reference price
+const POSITIONS = `
+    SELECT p.symbol,
+           p.quantity,
+           p.avg_cost,
+           m.mark AS mark_price,
+           ROUND(p.quantity * m.mark, 2) AS market_value,
+           ROUND((m.mark - p.avg_cost) * p.quantity, 2) AS unrealized_pnl,
+           p.realized_pnl
+    FROM positions p
+    JOIN instruments i ON i.symbol = p.symbol
+    CROSS JOIN LATERAL (
+        SELECT COALESCE(
+            (SELECT t.price
+             FROM trades t
+             WHERE t.symbol = p.symbol
+             ORDER BY t.id DESC
+             LIMIT 1),
+            i.reference_price
+        ) AS mark
+    ) m
+    WHERE p.user_id = $1`;
+
+const portfolio = async (req, res) => {
+    try {
+        const userId = req.user.userId;
+
+        const rows = await pool.query(
+            `${POSITIONS}
+             ORDER BY p.symbol`,
+            [userId]
+        );
+
+        // Net P&L: realised plus unrealised, minus the fees this user paid
+        const totals = await pool.query(
+            `WITH pos AS (${POSITIONS}),
+             tot AS (
+                 SELECT (SELECT COALESCE(SUM(realized_pnl), 0.00) FROM pos) AS realized,
+                        (SELECT COALESCE(SUM(unrealized_pnl), 0.00) FROM pos) AS unrealized,
+                        (SELECT COALESCE(SUM(e.amount), 0.00)
+                         FROM entries e
+                         JOIN transactions t ON t.id = e.transaction_id
+                         WHERE t.kind = 'FEE'
+                         AND e.user_id = $1
+                         AND e.entry_type = 'DEBIT') AS fees
+             )
+             SELECT realized, unrealized, fees, realized + unrealized - fees AS net
+             FROM tot`,
+            [userId]
+        );
+
+        return res.status(200).json({
+            portfolio: rows.rows,
+            realizedPnl: totals.rows[0].realized,
+            unrealizedPnl: totals.rows[0].unrealized,
+            feesPaid: totals.rows[0].fees,
+            netPnl: totals.rows[0].net
+        });
+    } catch (error) {
+        console.error(error);
+
+        return res.status(500).json({
+            error: "Internal server error"
+        });
+    }
+};
+
 module.exports = {
     deposit,
-    balance
+    balance,
+    portfolio
 };

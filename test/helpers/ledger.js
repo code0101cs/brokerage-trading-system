@@ -62,4 +62,39 @@ const depositShares = async (pool, userId, symbol, quantity) => {
     return postEntries(pool, { idemp: key("depsh"), kind: "DEPOSIT", description: "test shares", shares: [{ debit: deposits, credit: userId, symbol, quantity }] });
 };
 
-module.exports = { addUser, addInstrument, balance, shareBalance, key, depositCash, depositShares };
+// A trade row, with the two filled orders it needs
+const addTrade = async (pool, symbol, price, quantity, buyerId, sellerId) => {
+    const order = async (userId, side) => {
+        const row = await pool.query(
+            `INSERT INTO orders
+             (user_id, symbol, side, order_type, time_in_force, price, quantity, filled_quantity, status, idempotency_key)
+             VALUES ($1, $2, $3, 'LIMIT', 'DAY', $4, $5, $5, 'FILLED', $6)
+             RETURNING id`,
+            [userId, symbol, side, price, quantity, key("ord")]
+        );
+
+        return row.rows[0].id;
+    };
+
+    const buyOrder = await order(buyerId, "BUY");
+    const sellOrder = await order(sellerId, "SELL");
+
+    const trade = await pool.query(
+        `INSERT INTO trades
+         (trade_id, symbol, price, quantity, buy_order_id, sell_order_id)
+         VALUES ($1, $2, $3, $4, $5, $6)
+         RETURNING id`,
+        [key("trade"), symbol, price, quantity, buyOrder, sellOrder]
+    );
+
+    return trade.rows[0].id;
+};
+
+// A fee the user paid to the fees account
+const chargeFee = async (pool, userId, amount) => {
+    const fees = await systemId(pool, "fees");
+
+    return postEntries(pool, { idemp: key("fee"), kind: "FEE", description: "test fee", cash: [{ debit: userId, credit: fees, amount }] });
+};
+
+module.exports = { addUser, addInstrument, balance, shareBalance, key, depositCash, depositShares, addTrade, chargeFee };

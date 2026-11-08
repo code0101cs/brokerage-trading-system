@@ -1,10 +1,11 @@
 const express = require("express");
 const router = express.Router();
 
-const { deposit, balance } = require("../controller/accountController.js");
+const { deposit, balance, portfolio } = require("../controller/accountController.js");
 const authMiddleware = require("../middleware/authMiddleware.js");
 
 router.post("/deposit", authMiddleware, deposit);
 router.get("/balance", authMiddleware, balance);
+router.get("/portfolio", authMiddleware, portfolio);
 
 module.exports = router;

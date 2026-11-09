@@ -62,9 +62,9 @@ const placeOrder = async (req, res) => {
             });
         }
 
-        if (orderType !== "LIMIT") {
+        if (orderType !== "LIMIT" && orderType !== "MARKET") {
             return res.status(400).json({
-                error: "Order type must be LIMIT"
+                error: "Order type must be LIMIT or MARKET"
             });
         }
 
@@ -80,7 +80,14 @@ const placeOrder = async (req, res) => {
             });
         }
 
-        if (!MONEY.test(price) || Number(price) <= 0) {
+        // A market order takes the market price, so it must not bring one
+        if (orderType === "MARKET" && rawPrice !== undefined && rawPrice !== null) {
+            return res.status(400).json({
+                error: "Market orders take no price"
+            });
+        }
+
+        if (orderType === "LIMIT" && (!MONEY.test(price) || Number(price) <= 0)) {
             return res.status(400).json({
                 error: "Price must be positive with at most two decimals"
             });
@@ -122,7 +129,7 @@ const placeOrder = async (req, res) => {
              (user_id, symbol, side, order_type, time_in_force, price, quantity, status, idempotency_key)
              VALUES ($1, $2, $3, $4, $5, $6, $7, 'NEW', $8)
              RETURNING id`,
-            [userId, symbol, side, orderType, timeInForce, price, quantity, idemp]
+            [userId, symbol, side, orderType, timeInForce, orderType === "MARKET" ? null : price, quantity, idemp]
         );
 
         const orderId = order.rows[0].id;
@@ -131,7 +138,7 @@ const placeOrder = async (req, res) => {
         await moveOrder(client, orderId, "NEW", "SUBMIT");
 
         // Risk checks against the instrument and the ledger
-        const risk = await vet(client, { userId, instrument: instrument.rows[0], side, quantity, price });
+        const risk = await vet(client, { userId, instrument: instrument.rows[0], side, orderType, quantity, price: orderType === "MARKET" ? null : price });
 
         if (risk.reason) {
             return await rejectOrder(client, res, orderId, risk.reason);
@@ -140,6 +147,16 @@ const placeOrder = async (req, res) => {
         // PENDING_RISK to ACCEPTED, then reserve the cash or the shares
         await moveOrder(client, orderId, "PENDING_RISK", "RISK_PASS");
         await placeHold(client, userId, orderId, risk.cashHold, risk.shareHold);
+
+        // A market buy keeps its collar, the engine gets it as the protection price
+        if (risk.protection) {
+            await client.query(
+                `UPDATE orders
+                 SET protection_price = $1
+                 WHERE id = $2`,
+                [risk.protection, orderId]
+            );
+        }
 
         await client.query("COMMIT");
 

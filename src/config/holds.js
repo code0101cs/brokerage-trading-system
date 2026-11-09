@@ -1,7 +1,8 @@
 const { feeSql } = require("./fees.js");
 
-// What is still unfilled on an order, in cash
-const REST = "(o.quantity - o.filled_quantity) * o.price";
+// What is still unfilled on an order, in cash. A market buy is valued at its protection price,
+// the most it can ever pay per share.
+const REST = "(o.quantity - o.filled_quantity) * COALESCE(o.price, o.protection_price)";
 
 // Cash a buy order reserves: its value plus the fee estimate
 const buyHold = async (client, quantity, price) => {
@@ -79,7 +80,7 @@ const resizeHold = async (client, orderId) => {
     await client.query(
         `UPDATE holds h
          SET cash_amount = CASE
-                 WHEN o.side = 'BUY' AND o.price IS NOT NULL THEN ${REST} + ${feeSql(REST)}
+                 WHEN o.side = 'BUY' AND COALESCE(o.price, o.protection_price) IS NOT NULL THEN ${REST} + ${feeSql(REST)}
                  ELSE h.cash_amount
              END,
              share_quantity = CASE

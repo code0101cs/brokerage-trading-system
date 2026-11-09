@@ -1,6 +1,9 @@
 // Small helpers for tests that need users, instruments and money in the database
-const { postEntries, systemId } = require("../../src/config/ledger.js");
-const { buyFill } = require("../../src/config/positions.js");
+const { postEntries, systemId, lockWallets } = require("../../src/config/ledger.js");
+const { buyFill, sellFill } = require("../../src/config/positions.js");
+const { resizeHold } = require("../../src/config/holds.js");
+const { moveOrder } = require("../../src/config/orders.js");
+const { feeSql } = require("../../src/config/fees.js");
 
 const addUser = async (pool, name) => {
     const user = await pool.query(
@@ -103,4 +106,61 @@ const chargeFee = async (pool, userId, amount) => {
     return postEntries(pool, { idemp: key("fee"), kind: "FEE", description: "test fee", cash: [{ debit: userId, credit: fees, amount }] });
 };
 
-module.exports = { addUser, addInstrument, balance, shareBalance, key, depositCash, depositShares, addTrade, chargeFee };
+// One fill of a resting order against a counterparty, the way the Phase 5 fill handler will do
+// it: the cash and share legs, the buyer's fee, both positions, the order's progress, its hold
+const fillOrder = async (pool, orderId, counterId, quantity, price) => {
+    const client = await pool.connect();
+
+    try {
+        await client.query("BEGIN");
+
+        const found = await client.query(
+            `SELECT user_id, symbol, side, quantity, filled_quantity, status FROM orders
+             WHERE id = $1
+             FOR UPDATE`,
+            [orderId]
+        );
+
+        const o = found.rows[0];
+        const buyer = o.side === "BUY" ? o.user_id : counterId;
+        const seller = o.side === "BUY" ? counterId : o.user_id;
+
+        await lockWallets(client, [buyer, seller]);
+
+        const value = (await client.query("SELECT $1::bigint * $2::numeric AS v", [quantity, price])).rows[0].v;
+        const fee = (await client.query(`SELECT ${feeSql("$1::numeric")} AS fee`, [value])).rows[0].fee;
+        const exchange = await systemId(client, "exchange");
+        const fees = await systemId(client, "fees");
+
+        await postEntries(client, {
+            idemp: key("fill"),
+            kind: "TRADE",
+            description: "test fill",
+            cash: [
+                { debit: buyer, credit: exchange, amount: value },
+                { debit: exchange, credit: seller, amount: value }
+            ],
+            shares: [
+                { debit: seller, credit: exchange, symbol: o.symbol, quantity },
+                { debit: exchange, credit: buyer, symbol: o.symbol, quantity }
+            ]
+        });
+
+        await postEntries(client, { idemp: key("fillfee"), kind: "FEE", description: "buy fee", cash: [{ debit: buyer, credit: fees, amount: fee }] });
+        await buyFill(client, buyer, o.symbol, quantity, price);
+        await sellFill(client, seller, o.symbol, quantity, price);
+
+        await client.query("UPDATE orders SET filled_quantity = filled_quantity + $1 WHERE id = $2", [quantity, orderId]);
+        await moveOrder(client, orderId, o.status, o.filled_quantity + quantity === o.quantity ? "FILL" : "PARTIAL_FILL");
+        await resizeHold(client, orderId);
+
+        await client.query("COMMIT");
+    } catch (error) {
+        await client.query("ROLLBACK");
+        throw error;
+    } finally {
+        client.release();
+    }
+};
+
+module.exports = { addUser, addInstrument, balance, shareBalance, key, depositCash, depositShares, addTrade, chargeFee, fillOrder };

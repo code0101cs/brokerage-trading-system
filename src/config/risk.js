@@ -6,7 +6,9 @@ const MAX_ORDER_VALUE = "10000000.00";
 
 // Pre-trade checks, in the order the plan lists them. The answer is { reason } for the first
 // check that fails, or { cashHold, shareHold } with what the order must reserve.
-const vet = async (client, { userId, instrument, side, orderType, quantity, price }) => {
+// A replace passes open (the unfilled part, what has to be funded) and own (the cash and shares
+// the order already holds, which are free to be reused).
+const vet = async (client, { userId, instrument, side, orderType, quantity, price, open = quantity, own = {} }) => {
     if (!isMarketOpen()) {
         return { reason: "Market closed" };
     }
@@ -68,10 +70,10 @@ const vet = async (client, { userId, instrument, side, orderType, quantity, pric
     }
 
     if (side === "BUY") {
-        const cashHold = await buyHold(client, quantity, price || collar);
+        const cashHold = await buyHold(client, open, price || collar);
         const available = await availableCash(client, userId);
 
-        const enough = await client.query("SELECT $1::numeric >= $2::numeric AS ok", [available, cashHold]);
+        const enough = await client.query("SELECT $1::numeric + $3::numeric >= $2::numeric AS ok", [available, cashHold, own.cash || "0.00"]);
 
         if (!enough.rows[0].ok) {
             return { reason: "Insufficient balance" };
@@ -82,11 +84,11 @@ const vet = async (client, { userId, instrument, side, orderType, quantity, pric
 
     const available = await availableShares(client, userId, instrument.symbol);
 
-    if (available < quantity) {
+    if (available + (own.shares || 0) < open) {
         return { reason: "Insufficient shares" };
     }
 
-    return { cashHold: "0.00", shareHold: quantity, protection: null };
+    return { cashHold: "0.00", shareHold: open, protection: null };
 };
 
 module.exports = { vet, MAX_ORDER_VALUE };

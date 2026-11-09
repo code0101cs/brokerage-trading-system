@@ -1,6 +1,7 @@
 const pool = require("../config/db.js");
 const { lockWallets } = require("../config/ledger.js");
-const { placeHold } = require("../config/holds.js");
+const { placeHold, resizeHold, releaseHold } = require("../config/holds.js");
+const gateway = require("../config/gateway.js");
 const { moveOrder } = require("../config/orders.js");
 const { vet } = require("../config/risk.js");
 
@@ -230,4 +231,289 @@ const getOrder = async (req, res) => {
     }
 };
 
-module.exports = { placeOrder, getOrder };
+// Statuses where an order is resting and can still be cancelled or replaced
+const OPEN = ["ACCEPTED", "WORKING", "PARTIALLY_FILLED"];
+
+// Cancel in two steps. First PENDING_CANCEL is saved, then the exchange is asked, and only when
+// it confirms does the order become CANCELLED and its hold go back to the user.
+const cancelOrder = async (req, res) => {
+    const client = await pool.connect();
+
+    try {
+        const id = req.params.id;
+
+        if (!/^\d{1,15}$/.test(id)) {
+            return res.status(400).json({
+                error: "Invalid order id"
+            });
+        }
+
+        await client.query("BEGIN");
+
+        // Lock the order, it must be the user's own
+        const found = await client.query(
+            `SELECT id, user_id, symbol, side, status FROM orders
+             WHERE id = $1
+             AND user_id = $2
+             FOR UPDATE`,
+            [id, req.user.userId]
+        );
+
+        if (found.rows.length === 0) {
+            await client.query("ROLLBACK");
+
+            return res.status(404).json({
+                error: "Order not found"
+            });
+        }
+
+        const order = found.rows[0];
+
+        if (order.status === "FILLED") {
+            await client.query("ROLLBACK");
+
+            return res.status(409).json({
+                error: "Order already filled"
+            });
+        }
+
+        if (order.status === "PENDING_CANCEL") {
+            await client.query("ROLLBACK");
+
+            return res.status(409).json({
+                error: "Cancel already requested"
+            });
+        }
+
+        if (!OPEN.includes(order.status)) {
+            await client.query("ROLLBACK");
+
+            return res.status(409).json({
+                error: "Order already closed"
+            });
+        }
+
+        // Step one: PENDING_CANCEL
+        if ((await moveOrder(client, order.id, order.status, "CANCEL_REQUEST")) === null) {
+            await client.query("ROLLBACK");
+
+            return res.status(409).json({
+                error: "Order was changed by another request"
+            });
+        }
+
+        await client.query("COMMIT");
+
+        // Ask the exchange to take the order off the book
+        const removed = await gateway.cancel(order);
+
+        // It was no longer resting: a fill got there first, and the fill closes the order
+        if (!removed) {
+            return res.status(409).json({
+                error: "Order already filled"
+            });
+        }
+
+        // Step two: confirmed, so CANCELLED and the hold goes back
+        await client.query("BEGIN");
+
+        await client.query("SELECT id FROM orders WHERE id = $1 FOR UPDATE", [order.id]);
+
+        if ((await moveOrder(client, order.id, "PENDING_CANCEL", "CANCELLED")) === null) {
+            await client.query("ROLLBACK");
+
+            return res.status(409).json({
+                error: "Order already filled"
+            });
+        }
+
+        await releaseHold(client, order.id);
+
+        await client.query("COMMIT");
+
+        return res.status(200).json({
+            message: "Order cancelled",
+            orderId: order.id
+        });
+    } catch (error) {
+        await client.query("ROLLBACK");
+
+        console.error(error);
+
+        return res.status(500).json({
+            error: "Internal server error"
+        });
+    } finally {
+        client.release();
+    }
+};
+
+// Change the quantity or the price of a resting limit order. The new values are checked like a
+// new order, the hold is resized in the same transaction, and the exchange is told before commit,
+// so if it refuses nothing has changed.
+const replaceOrder = async (req, res) => {
+    const client = await pool.connect();
+
+    try {
+        const id = req.params.id;
+        const { quantity } = req.body || {};
+        const rawPrice = (req.body || {}).price;
+        const price = typeof rawPrice === "string" || typeof rawPrice === "number" ? String(rawPrice) : "";
+
+        if (!/^\d{1,15}$/.test(id)) {
+            return res.status(400).json({
+                error: "Invalid order id"
+            });
+        }
+
+        if (quantity === undefined && rawPrice === undefined) {
+            return res.status(400).json({
+                error: "Nothing to change"
+            });
+        }
+
+        if (quantity !== undefined && (!Number.isSafeInteger(quantity) || quantity <= 0)) {
+            return res.status(400).json({
+                error: "Quantity must be a positive whole number"
+            });
+        }
+
+        if (rawPrice !== undefined && (!MONEY.test(price) || Number(price) <= 0)) {
+            return res.status(400).json({
+                error: "Price must be positive with at most two decimals"
+            });
+        }
+
+        await client.query("BEGIN");
+
+        // Lock the order, then the wallet, always in that order
+        const found = await client.query(
+            `SELECT id, user_id, symbol, side, order_type, price, quantity, filled_quantity, status FROM orders
+             WHERE id = $1
+             AND user_id = $2
+             FOR UPDATE`,
+            [id, req.user.userId]
+        );
+
+        if (found.rows.length === 0) {
+            await client.query("ROLLBACK");
+
+            return res.status(404).json({
+                error: "Order not found"
+            });
+        }
+
+        const order = found.rows[0];
+
+        if (order.status === "FILLED") {
+            await client.query("ROLLBACK");
+
+            return res.status(409).json({
+                error: "Order already filled"
+            });
+        }
+
+        if (!OPEN.includes(order.status)) {
+            await client.query("ROLLBACK");
+
+            return res.status(409).json({
+                error: "Order can no longer be changed"
+            });
+        }
+
+        if (order.order_type !== "LIMIT") {
+            await client.query("ROLLBACK");
+
+            return res.status(400).json({
+                error: "Only limit orders can be changed"
+            });
+        }
+
+        const newQuantity = quantity === undefined ? order.quantity : quantity;
+        const newPrice = rawPrice === undefined ? order.price : price;
+
+        if (newQuantity <= order.filled_quantity) {
+            await client.query("ROLLBACK");
+
+            return res.status(400).json({
+                error: "Quantity must be above the filled quantity"
+            });
+        }
+
+        await lockWallets(client, [order.user_id]);
+
+        const instrument = await client.query(
+            `SELECT symbol, halted FROM instruments
+             WHERE symbol = $1`,
+            [order.symbol]
+        );
+
+        const hold = await client.query(
+            `SELECT cash_amount, share_quantity FROM holds
+             WHERE order_id = $1
+             AND status = 'ACTIVE'`,
+            [order.id]
+        );
+
+        // Same checks as a new order. Funds are needed for the unfilled part only, and what the
+        // order already holds counts as available.
+        const risk = await vet(client, {
+            userId: order.user_id,
+            instrument: instrument.rows[0],
+            side: order.side,
+            orderType: "LIMIT",
+            quantity: newQuantity,
+            price: newPrice,
+            open: newQuantity - order.filled_quantity,
+            own: { cash: hold.rows[0].cash_amount, shares: hold.rows[0].share_quantity }
+        });
+
+        if (risk.reason) {
+            await client.query("ROLLBACK");
+
+            return res.status(400).json({
+                error: risk.reason
+            });
+        }
+
+        await client.query(
+            `UPDATE orders
+             SET quantity = $1, price = $2
+             WHERE id = $3`,
+            [newQuantity, newPrice, order.id]
+        );
+
+        // The hold follows the new unfilled size and price
+        await resizeHold(client, order.id);
+
+        // Tell the exchange, and keep everything only if it took the change
+        const taken = await gateway.replace(order, newQuantity, newPrice);
+
+        if (!taken) {
+            await client.query("ROLLBACK");
+
+            return res.status(409).json({
+                error: "Order already filled"
+            });
+        }
+
+        await client.query("COMMIT");
+
+        return res.status(200).json({
+            message: "Order replaced",
+            orderId: order.id
+        });
+    } catch (error) {
+        await client.query("ROLLBACK");
+
+        console.error(error);
+
+        return res.status(500).json({
+            error: "Internal server error"
+        });
+    } finally {
+        client.release();
+    }
+};
+
+module.exports = { placeOrder, getOrder, cancelOrder, replaceOrder };

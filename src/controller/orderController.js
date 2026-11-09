@@ -172,4 +172,50 @@ const placeOrder = async (req, res) => {
     }
 };
 
-module.exports = { placeOrder };
+// The order and its lifecycle log, only for the user who placed it
+const getOrder = async (req, res) => {
+    try {
+        const id = req.params.id;
+
+        if (!/^\d{1,15}$/.test(id)) {
+            return res.status(400).json({
+                error: "Invalid order id"
+            });
+        }
+
+        const order = await pool.query(
+            `SELECT id, symbol, side, order_type, time_in_force, price, quantity, filled_quantity, status, reject_reason, created_at
+             FROM orders
+             WHERE id = $1
+             AND user_id = $2`,
+            [id, req.user.userId]
+        );
+
+        if (order.rows.length === 0) {
+            return res.status(404).json({
+                error: "Order not found"
+            });
+        }
+
+        const events = await pool.query(
+            `SELECT event, from_status, to_status, detail, created_at
+             FROM order_events
+             WHERE order_id = $1
+             ORDER BY id`,
+            [id]
+        );
+
+        return res.status(200).json({
+            order: order.rows[0],
+            events: events.rows
+        });
+    } catch (error) {
+        console.error(error);
+
+        return res.status(500).json({
+            error: "Internal server error"
+        });
+    }
+};
+
+module.exports = { placeOrder, getOrder };

@@ -1,12 +1,31 @@
 const pool = require("../config/db.js");
 const { lockWallets } = require("../config/ledger.js");
-const { buyHold, availableCash, availableShares, placeHold } = require("../config/holds.js");
+const { placeHold } = require("../config/holds.js");
 const { moveOrder } = require("../config/orders.js");
+const { vet } = require("../config/risk.js");
 
 // Up to 10 digits and at most two decimals, what NUMERIC(12,2) holds
 const MONEY = /^\d{1,10}(\.\d{1,2})?$/;
 
-// The first cut of order intake: limit orders and their hold. Phase 4 adds the risk checks.
+// Stores the order as REJECTED with its reason, so the refusal is on record, and answers 400
+const rejectOrder = async (client, res, orderId, reason) => {
+    await moveOrder(client, orderId, "PENDING_RISK", "RISK_FAIL", { reason });
+
+    await client.query(
+        `UPDATE orders
+         SET reject_reason = $1
+         WHERE id = $2`,
+        [reason, orderId]
+    );
+
+    await client.query("COMMIT");
+
+    return res.status(400).json({
+        error: reason,
+        orderId
+    });
+};
+
 const placeOrder = async (req, res) => {
     const client = await pool.connect();
 
@@ -55,7 +74,7 @@ const placeOrder = async (req, res) => {
             });
         }
 
-        if (!Number.isInteger(quantity) || quantity <= 0) {
+        if (!Number.isSafeInteger(quantity) || quantity <= 0) {
             return res.status(400).json({
                 error: "Quantity must be a positive whole number"
             });
@@ -81,7 +100,7 @@ const placeOrder = async (req, res) => {
         }
 
         const instrument = await client.query(
-            `SELECT symbol FROM instruments
+            `SELECT symbol, halted FROM instruments
              WHERE symbol = $1`,
             [symbol]
         );
@@ -97,37 +116,6 @@ const placeOrder = async (req, res) => {
         // Lock the user's wallet
         await lockWallets(client, [userId]);
 
-        let cashHold = "0.00";
-        let shareHold = 0;
-
-        if (side === "BUY") {
-            // Check available balance (balance minus active holds)
-            cashHold = await buyHold(client, quantity, price);
-
-            const available = await availableCash(client, userId);
-
-            if (Number(available) < Number(cashHold)) {
-                await client.query("ROLLBACK");
-
-                return res.status(400).json({
-                    error: "Insufficient balance"
-                });
-            }
-        } else {
-            // Check available shares (balance minus active share holds)
-            shareHold = quantity;
-
-            const available = await availableShares(client, userId, symbol);
-
-            if (available < quantity) {
-                await client.query("ROLLBACK");
-
-                return res.status(400).json({
-                    error: "Insufficient shares"
-                });
-            }
-        }
-
         // Create order
         const order = await client.query(
             `INSERT INTO orders
@@ -139,12 +127,19 @@ const placeOrder = async (req, res) => {
 
         const orderId = order.rows[0].id;
 
-        // NEW, PENDING_RISK, ACCEPTED
+        // NEW to PENDING_RISK
         await moveOrder(client, orderId, "NEW", "SUBMIT");
-        await moveOrder(client, orderId, "PENDING_RISK", "RISK_PASS");
 
-        // Reserve the cash or the shares
-        await placeHold(client, userId, orderId, cashHold, shareHold);
+        // Risk checks against the instrument and the ledger
+        const risk = await vet(client, { userId, instrument: instrument.rows[0], side, quantity, price });
+
+        if (risk.reason) {
+            return await rejectOrder(client, res, orderId, risk.reason);
+        }
+
+        // PENDING_RISK to ACCEPTED, then reserve the cash or the shares
+        await moveOrder(client, orderId, "PENDING_RISK", "RISK_PASS");
+        await placeHold(client, userId, orderId, risk.cashHold, risk.shareHold);
 
         await client.query("COMMIT");
 

@@ -41,6 +41,7 @@ const useDb = (name) => {
         // Anything loaded after this point, the app included, talks to the new database
         process.env.DB_NAME = dbName;
         process.env.SECRET_KEY = process.env.SECRET_KEY || "test-secret";
+        process.env.MARKET_HOURS = process.env.MARKET_HOURS || "always";
 
         state.pool = new Pool({ ...config, database: dbName });
 

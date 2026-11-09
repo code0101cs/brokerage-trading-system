@@ -17,6 +17,8 @@ const seed = async () => {
     if (!seeded) {
         seeded = true;
         await addInstrument(state.pool, "TCS", "500.00");
+        // These tests use prices far from 500.00, so the 10% band and the 0.05 tick would get in the way
+        await state.pool.query("UPDATE instruments SET band_pct = 900, tick_size = 0.01 WHERE symbol = 'TCS'");
     }
 };
 
@@ -116,7 +118,7 @@ dbTest("a sell holds its shares and available shares drop by them", async () => 
     const more = await order(user, "carol-2", "SELL", 61);
 
     assert.strictEqual(more.status, 400);
-    assert.deepStrictEqual(more.body, { error: "Insufficient shares" });
+    assert.strictEqual(more.body.error, "Insufficient shares");
 
     const ok = await order(user, "carol-3", "SELL", 60);
 
@@ -124,18 +126,18 @@ dbTest("a sell holds its shares and available shares drop by them", async () => 
     assert.strictEqual(await availableShares(state.pool, user.userId, "TCS"), 0);
 });
 
-dbTest("an order that does not fit is refused with 400 and leaves no trace", async () => {
+dbTest("an order that does not fit is refused with 400, stored as REJECTED, and holds nothing", async () => {
     const user = await trader("dave", "1000.00");
 
     // 3 at 500.00 costs 1500.45
     const res = await order(user, "dave-1", "BUY", 3);
 
     assert.strictEqual(res.status, 400);
-    assert.deepStrictEqual(res.body, { error: "Insufficient balance" });
+    assert.strictEqual(res.body.error, "Insufficient balance");
 
-    const none = await state.pool.query("SELECT count(*) AS n FROM orders WHERE user_id = $1", [user.userId]);
+    const row = await state.pool.query("SELECT status, reject_reason FROM orders WHERE id = $1", [res.body.orderId]);
 
-    assert.strictEqual(none.rows[0].n, 0);
+    assert.deepStrictEqual(row.rows, [{ status: "REJECTED", reject_reason: "Insufficient balance" }]);
     assert.deepStrictEqual(await holdsOf(user.userId), []);
 
     // Exactly the available amount is fine: 1 at 999.00 plus fee 0.30 is 999.30
@@ -165,7 +167,7 @@ dbTest("selling shares you do not hold is refused", async () => {
     const res = await order(user, "erin-1", "SELL", 1);
 
     assert.strictEqual(res.status, 400);
-    assert.deepStrictEqual(res.body, { error: "Insufficient shares" });
+    assert.strictEqual(res.body.error, "Insufficient shares");
 });
 
 dbTest("two orders that fit the balance separately but not together give one 201 and one 400", async () => {

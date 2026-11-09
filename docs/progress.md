@@ -1,5 +1,32 @@
 # Progress
 
+## Phase 4: Risk engine and order management (v0.4)
+
+Exit gate: an invalid order is rejected with a clear message, and a valid order reaches ACCEPTED with its hold in place. Met.
+
+| Task | What landed |
+|---|---|
+| 4.1 | `POST /orders` (from Phase 3, now complete), `GET /orders/:id` returning `{ order, events }` (404 for a missing or foreign order). A table of 19 bad payloads and the duplicate key race are tested. |
+| 4.2 | `vet()` in `src/config/risk.js` runs the nine checks in the plan's order. `rejectOrder` stores the order as REJECTED with its reason and a RISK_FAIL event, and answers 400. Every message has a test, and so does the order of the checks. |
+| 4.3 | Market orders. A buy reserves quantity x (last price + 5%) plus fee and keeps the collar in `orders.protection_price`. A test runs it through the engine: fills stop at the collar, the rest is cancelled with `PROTECTION_PRICE`, the hold covers the cost. |
+| 4.4 | Tests for the lifecycle guarantees: one winner among 20 concurrent steps, every illegal state and event pair throws and writes nothing, the event log is a connected chain, and a scan fails if code outside `moveOrder` updates an order's status. |
+| 4.5 | `DELETE /orders/:id` (PENDING_CANCEL, then CANCELLED on the exchange's confirmation, hold released) and `PATCH /orders/:id` (checks again, hold resized, exchange told before commit). Cancel before fill, cancel after fill (both race variants) and cancel of a partly filled order are tested. |
+| 4.6 | 50 simultaneous buys at one user, each a third of the balance: exactly 3 answer 201 and 47 answer 400 "Insufficient balance", and the audit passes. The same for sells, for buys and sells together, for ten users at once and for market buys. |
+
+Notes:
+
+- A rejected order is now stored. In Phase 3 a refused order left no row; now it is a REJECTED order with its reason, its events and no hold, and it keeps its idempotency key (a retry is a 409). The 400 body is `{ error, orderId }`, one key more than the plan's `{ error }`, so the client can look the order up. A payload error (bad type, bad price format) and an unknown symbol stay plain 400s with no row, because those never become an order.
+- The plan gives no value for "Order value too large" or for trading hours, so: the limit is 10000000.00 per order (`MAX_ORDER_VALUE` in `risk.js`), and the market is open 09:15 to 15:30 India time on weekdays, with no holiday calendar. `MARKET_HOURS=always` or `never` overrides the clock. The test helper sets `always`, and `.env.example` documents it.
+- The collar is `ROUND(last x 1.05, 2)` per share, then times quantity. The plan writes the ROUND around the whole product. Per share keeps the hold and the engine's protection price equal to one whole paisa price, which the engine needs, and the hold is the exact worst case. The last price is the latest trade, else the reference price, the same mark the portfolio uses.
+- `src/config/gateway.js` is the line to the exchange: `cancel` and `replace`, both answering true until Phase 5 puts the engine behind them. A false answer means the order was no longer resting. Tests replace it to simulate a fill that lands first. It is the one extra module in this phase.
+- Replace is not a state change, so it writes no `order_events` row (the event list is fixed by the state machine from task 1.5). The exchange is told inside the transaction, so a refusal rolls the order and the hold back together. If the process dies between the exchange accepting and the commit, the two disagree. Phase 5 reconciliation has to cover that.
+- A cancel the exchange could not carry out because the order filled leaves the order in PENDING_CANCEL and answers 409. The fill handler moves it to FILLED (the state machine allows it). If the exchange call throws, the order also stays in PENDING_CANCEL and the answer is 500.
+- Locks are taken in one order everywhere: the order row first, then the wallet. Place, cancel, replace and the test fill helper all follow it, so they cannot deadlock each other.
+- Quantity is now checked with `Number.isSafeInteger`, so a quantity past 2^53 is a 400, not a database overflow.
+- Existing tests that used prices far from the reference price (holds) now widen the band and tick on their own instrument. Phase 3's "leaves no trace" assertions became "stored as REJECTED".
+
+Open risk for Phase 5, not fixed here: the hold's fee is the fee on the whole order, but the fill handler will charge a fee per fill, rounded up and capped at 20.00 each time. Many small fills at the limit price can cost a few paise more than the hold (10 fills of 1 share at 1.00 pay 0.10 in fees against a hold fee of 0.01), and an account with exactly the hold could end up below zero. Phase 5 has to settle the fee policy (charge per order, or keep a fee reserve in the hold) before fills are booked, and the audit's I1 check will catch it if not.
+
 ## Phase 3: Accounts, ledger and positions (v0.3)
 
 Exit gate: every transaction balances, and the audit query reports zero drift. Met.

@@ -56,6 +56,7 @@ erDiagram
         varchar order_type
         varchar time_in_force
         numeric price
+        numeric protection_price
         bigint quantity
         bigint filled_quantity
         varchar status
@@ -166,6 +167,7 @@ erDiagram
 - Foreign keys are inline and the types match on both sides.
 - Fixed sets use `CHECK (col IN (...))`, quantities use `CHECK (quantity > 0)`, and money is `NUMERIC(12,2)` (ADR 0001).
 - Every idempotency column has a unique key: `orders.idempotency_key`, `transactions.idempotency_key`, `trades.trade_id` and `events (stream, stream_seq)`. `settlements.trade_id` and `holds.order_id` are unique so a repeat cannot create a second row.
+- `orders.price` is NULL for a market order. A market buy keeps its collar (last price plus 5%) in `orders.protection_price`, the most it can pay per share. The hold and the engine's protection price both come from it.
 - Indexes: `orders (symbol, status)`, `entries (user_id)`, plus the lookups the later phases hit (see the model files).
 
 ## Added later
